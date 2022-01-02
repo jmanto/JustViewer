@@ -2,16 +2,48 @@ import os.path
 import glob
 import subprocess
 
+from time import sleep
+
 from functools import partial
 
 from PyQt5 import QtWidgets, QtCore, QtGui
 
+import package.app_base as ab
+
 FILEBROWSER_PATH = os.path.join(os.getenv('WINDIR'), 'explorer.exe')
+
+
+class QOpenBox(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+
+        x, y = ab.window_corner(ab.width, ab.height)
+        self.setGeometry(x, y, ab.width, ab.height)
+
+        self.lbl_picture = QtWidgets.QLabel()
+        self.lbl_picture.setPixmap(QtGui.QPixmap("assets/OpenPicture.png"))
+
+        style = ab.apply_style()
+        self.setStyleSheet(style)
+
+        layout = QtWidgets.QGridLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.lbl_picture, 0, 0, 1, 1)
+
+        self.setLayout(layout)
+
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint)
+
+        self.show()
+        sleep(2)
+        self.close()
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, log_file="log_file.txt"):
         super().__init__()
 
+        self.window_maximized = False
         self.viewer_width = 1635
         self.viewer_height = 945
 
@@ -29,13 +61,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.open_icon = self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon)
         self.openDir_icon = self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon)
-
-        self.previous_icon = self.style().standardIcon(QtWidgets.QStyle.SP_MediaSkipBackward)
-        self.next_icon = self.style().standardIcon(QtWidgets.QStyle.SP_MediaSkipForward)
         self.clip_icon = self.style().standardIcon(QtWidgets.QStyle.SP_FileLinkIcon)
         self.showclip_icon = self.style().standardIcon(QtWidgets.QStyle.SP_DirLinkIcon)
 
         self.setup_ui()
+
+        wb = QOpenBox()
+        wb.show()
+
         self.showMaximized()
 
     def setup_ui(self):
@@ -55,21 +88,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # ACTIONS
         self.act_open = self.toolbar.addAction(self.open_icon, "Open File")
         self.act_openDir = self.toolbar.addAction(self.openDir_icon, "Open Directory")
-
-        self.act_previous = self.toolbar.addAction(self.previous_icon, "Previous")
-        self.act_next = self.toolbar.addAction(self.next_icon, "Next")
         self.act_clip = self.toolbar.addAction(self.clip_icon, "To Clipboard")
         self.act_showclip = self.toolbar.addAction(self.showclip_icon, "Show Clipboard Folder")
 
     def modify_widgets(self):
-        self.act_previous.setDisabled(True)
-        self.act_next.setDisabled(True)
+        style = ab.apply_style()
+        self.setStyleSheet(style)
         self.act_clip.setDisabled(True)
 
         self.graphicsView.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContentsOnFirstShow)
         self.graphicsView.setAlignment(QtCore.Qt.AlignJustify|QtCore.Qt.AlignVCenter)
 
-        self.treeWidget.headerItem().setText(0, "Folders")
+        self.treeWidget.headerItem().setText(0, "Folders and Files")
         self.treeWidget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Ignored)
 
     def create_layouts(self):
@@ -82,10 +112,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.layout_v.addWidget(self.infoLabel)
         self.layout_v.addWidget(self.graphicsView)
 
-        self.layout_all.addWidget(self.treeWidget, 1, 1)
-        self.layout_all.addLayout(self.layout_v, 1, 2)
+        self.layout_all.addWidget(self.treeWidget, 0, 0, 1, 1)
+        self.layout_all.addLayout(self.layout_v, 0, 1, 1, 1)
 
-        self.layout_all.setColumnStretch(2, 1)
+        self.layout_all.setColumnStretch(0, 1)
+        self.layout_all.setColumnStretch(1, 12)
 
         wid = QtWidgets.QWidget(self)
         self.setCentralWidget(wid)
@@ -93,15 +124,16 @@ class MainWindow(QtWidgets.QMainWindow):
         wid.setLayout(self.layout_all)
 
     def setup_connections(self):
+        QtWidgets.QShortcut(QtGui.QKeySequence("F"), self, self.change_window_state)
+        QtWidgets.QShortcut(QtGui.QKeySequence("A"), self, self.fast_backward)
+        QtWidgets.QShortcut(QtGui.QKeySequence("S"), self, self.fast_forward)
+
         self.graphicsView.viewport().installEventFilter(self)
 
         self.treeWidget.itemDoubleClicked.connect(self.onItemClicked)
 
         self.act_open.triggered.connect(self.open)
         self.act_openDir.triggered.connect(self.openDir)
-
-        self.act_previous.triggered.connect(self.previousImage)
-        self.act_next.triggered.connect(self.nextImage)
         self.act_clip.triggered.connect(self.clip)
         self.act_showclip.triggered.connect(partial(self.explore, self.LOG_FILE))
 
@@ -113,6 +145,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.previousImage()
 
         return False  # A garder pour éviter une erreur
+
+    def change_window_state(self):
+        self.window_maximized = not self.window_maximized
+
+        if self.window_maximized:
+            self.showFullScreen()
+            self.treeWidget.hide()
+            self.infoLabel.hide()
+            self.layout_all.setColumnStretch(0, 0)
+            self.layout_all.setColumnStretch(1, 1)
+        else:
+            self.showMaximized()
+            self.treeWidget.show()
+            self.infoLabel.show()
 
     def clip(self):
         if self.all_image:
@@ -173,7 +219,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def open(self):
         options = QtWidgets.QFileDialog.Options()
 
-        fileName, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Sélectionner un fichier image', '',
+        fileName, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Select an image file', '',
                                                   'Images (*.png *.jpeg *.jpg *.bmp *.gif)', options=options)
 
         if fileName:
@@ -198,22 +244,22 @@ class MainWindow(QtWidgets.QMainWindow):
         file_dialog = QtWidgets.QFileDialog(self)
         file_dialog.setFileMode(QtWidgets.QFileDialog.Directory)
 
-        directory = QtWidgets.QFileDialog.getExistingDirectory(self, "Sélectionner un répertoire", "", QtWidgets.QFileDialog.ShowDirsOnly)
+        directory = QtWidgets.QFileDialog.getExistingDirectory(self, "Select a directory", "", QtWidgets.QFileDialog.ShowDirsOnly)
 
         if directory:
             self.load_project_structure(directory, self.treeWidget)
             self.rootDir = directory
 
     def showImageInView(self, fileName):
+        v_width = self.graphicsView.size()
+
         scene = QtWidgets.QGraphicsScene(self)
-        pixmap = QtGui.QPixmap(fileName).scaled(self.viewer_width, self.viewer_height, QtCore.Qt.KeepAspectRatio)
+        pixmap = QtGui.QPixmap(fileName).scaled(v_width - QtCore.QSize(2, 2), QtCore.Qt.KeepAspectRatio)
         item = QtWidgets.QGraphicsPixmapItem(pixmap)
         scene.addItem(item)
 
         self.graphicsView.setScene(scene)
-
         self.infoLabel.setText(f"[{self.id + 1}/{self.nb_images}]: {fileName}")
-        self.infoLabel.setStyleSheet("color: black;")
 
     def previousImage(self):
         self.id = (self.id - 1) % self.nb_images
@@ -227,8 +273,18 @@ class MainWindow(QtWidgets.QMainWindow):
         fileName = self.all_image[self.id]
         self.showImageInView(fileName)
 
+    def fast_backward(self):
+        self.id = (self.id - round(self.nb_images / 20)) % self.nb_images
+
+        fileName = self.all_image[self.id]
+        self.showImageInView(fileName)
+
+    def fast_forward(self):
+        self.id = (self.id + round(self.nb_images / 20)) % self.nb_images
+
+        fileName = self.all_image[self.id]
+        self.showImageInView(fileName)
+
     def update_buttons(self):
-        self.act_previous.setDisabled(False)
-        self.act_next.setDisabled(False)
         self.act_clip.setDisabled(False)
 
