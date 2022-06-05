@@ -2,62 +2,41 @@ import os.path
 import glob
 import subprocess
 
-from time import sleep
-
 from functools import partial
 
 from PyQt5 import QtWidgets, QtCore, QtGui
+
+from PIL import Image, ImageOps, ExifTags
+import exifread
 
 import package.app_base as ab
 
 FILEBROWSER_PATH = os.path.join(os.getenv('WINDIR'), 'explorer.exe')
 
 
-class QOpenBox(QtWidgets.QWidget):
+class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
 
-        x, y = ab.window_corner(ab.width, ab.height)
-        self.setGeometry(x, y, ab.width, ab.height)
-
-        self.lbl_picture = QtWidgets.QLabel()
-        self.lbl_picture.setPixmap(QtGui.QPixmap("assets/OpenPicture.png"))
-
-        style = ab.apply_style()
-        self.setStyleSheet(style)
-
-        layout = QtWidgets.QGridLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.lbl_picture, 0, 0, 1, 1)
-
-        self.setLayout(layout)
-
-        self.setWindowFlags(QtCore.Qt.FramelessWindowHint)
-
-        self.show()
-        sleep(2)
-        self.close()
-
-
-class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, log_file="log_file.txt"):
-        super().__init__()
+        self.help_window = ab.InfoWindow(title=ab.APP_NAME + " - Help", text=ab.help_str)
 
         self.window_maximized = False
-        self.viewer_width = 1635
-        self.viewer_height = 945
+        self.show_exif_info = True
+        self.info_str = "No EXIF info"
 
-        self.LOG_FILE = log_file
+        if not os.path.exists(ab.LOG_DIR):
+            os.makedirs(ab.LOG_DIR)
+
+        self.LOG_FILE = os.path.join(ab.LOG_DIR, ab.LOG_FILE)
 
         self.all_image = list()
-        self.to_delete = list()
         self.id = 0
         self.nb_images = 0
 
         self.rootDir = ""
 
-        self.setWindowTitle("JustViewer")
-        self.setWindowIcon(QtGui.QIcon('assets/JustViewer.png'))
+        wb = ab.OpeningWindow(width=ab.width, height=ab.height)
+        wb.show()
 
         self.open_icon = self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon)
         self.openDir_icon = self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon)
@@ -65,9 +44,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.showclip_icon = self.style().standardIcon(QtWidgets.QStyle.SP_DirLinkIcon)
 
         self.setup_ui()
-
-        wb = QOpenBox()
-        wb.show()
+        self.setWindowTitle(ab.APP_NAME)
+        self.setWindowIcon(QtGui.QIcon(ab.APP_ICON))
 
         self.showMaximized()
 
@@ -80,10 +58,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def create_widgets(self):
         self.graphicsView = QtWidgets.QGraphicsView()
-        self.infoLabel = QtWidgets.QLineEdit()
+        self.nbImage = QtWidgets.QLineEdit()
         self.treeWidget = QtWidgets.QTreeWidget()
-
+        self.exifInfo = QtWidgets.QPlainTextEdit()
         self.toolbar = QtWidgets.QToolBar()
+
+        self.picture_name = ab.OnTopInfo(self.graphicsView, "No image")
 
         # ACTIONS
         self.act_open = self.toolbar.addAction(self.open_icon, "Open File")
@@ -102,21 +82,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.treeWidget.headerItem().setText(0, "Folders and Files")
         self.treeWidget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Ignored)
 
+        self.nbImage.setAlignment(QtCore.Qt.AlignHCenter)
+
     def create_layouts(self):
+        self.splitter_v = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.splitter_h = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+
         self.layout_v = QtWidgets.QVBoxLayout()
         self.layout_all = QtWidgets.QGridLayout()
 
     def add_widgets_to_layouts(self):
         self.addToolBar(self.toolbar)
 
-        self.layout_v.addWidget(self.infoLabel)
-        self.layout_v.addWidget(self.graphicsView)
+        self.splitter_v.addWidget(self.treeWidget)
+        self.splitter_v.addWidget(self.nbImage)
 
-        self.layout_all.addWidget(self.treeWidget, 0, 0, 1, 1)
-        self.layout_all.addLayout(self.layout_v, 0, 1, 1, 1)
+        self.splitter_v.setStretchFactor(0, 10)
+        self.splitter_v.setStretchFactor(1, 1)
 
-        self.layout_all.setColumnStretch(0, 1)
-        self.layout_all.setColumnStretch(1, 12)
+        self.splitter_h.addWidget(self.splitter_v)
+        self.splitter_h.addWidget(self.graphicsView)
+        self.splitter_h.addWidget(self.exifInfo)
+
+        self.splitter_h.setStretchFactor(0, 1)
+        self.splitter_h.setStretchFactor(1, 12)
+        self.splitter_h.setStretchFactor(2, 1)
+
+        self.layout_all.addWidget(self.splitter_h)
 
         wid = QtWidgets.QWidget(self)
         self.setCentralWidget(wid)
@@ -127,6 +119,9 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QShortcut(QtGui.QKeySequence("F"), self, self.change_window_state)
         QtWidgets.QShortcut(QtGui.QKeySequence("A"), self, self.fast_backward)
         QtWidgets.QShortcut(QtGui.QKeySequence("S"), self, self.fast_forward)
+        QtWidgets.QShortcut(QtGui.QKeySequence("E"), self, self.switch_info)
+        QtWidgets.QShortcut(QtGui.QKeySequence("H"), self, self.show_help)
+        QtWidgets.QShortcut(QtGui.QKeySequence("I"), self, self.show_picture_name)
 
         self.graphicsView.viewport().installEventFilter(self)
 
@@ -138,11 +133,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_showclip.triggered.connect(partial(self.explore, self.LOG_FILE))
 
     def eventFilter(self, source, event):
-        if source == self.graphicsView.viewport() and event.type() == QtCore.QEvent.Wheel:
+        if source == self.graphicsView.viewport() and event.type() == QtCore.QEvent.Wheel and self.nb_images != 0:
             if event.angleDelta().y() < 0:
                 self.nextImage()
             else:
                 self.previousImage()
+
+        if source == self.graphicsView.viewport() and event.type() == QtCore.QEvent.MouseButtonDblClick:
+            self.show_exif_info = False
+            self.exifInfo.hide()
+
+            self.picture_name.hide()
+
+            self.window_maximized = True
+            self.showFullScreen()
+            self.splitter_v.hide()
 
         return False  # A garder pour éviter une erreur
 
@@ -151,14 +156,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self.window_maximized:
             self.showFullScreen()
-            self.treeWidget.hide()
-            self.infoLabel.hide()
-            self.layout_all.setColumnStretch(0, 0)
-            self.layout_all.setColumnStretch(1, 1)
+            self.splitter_v.hide()
         else:
             self.showMaximized()
-            self.treeWidget.show()
-            self.infoLabel.show()
+            self.splitter_v.show()
 
     def clip(self):
         if self.all_image:
@@ -203,11 +204,9 @@ class MainWindow(QtWidgets.QMainWindow):
             res = [f for f in gen if
                    ".png" in f or ".jpeg" in f or ".jpg" in f or ".JPG" in f or ".bmp" in f or ".gif" in f]
             self.all_image = list()
-            self.to_delete = list()
 
             for file in res:
                 self.all_image.append(os.path.normpath(file))
-                self.to_delete.append(False)
 
             self.id = 0
             self.nb_images = len(self.all_image)
@@ -223,20 +222,19 @@ class MainWindow(QtWidgets.QMainWindow):
                                                   'Images (*.png *.jpeg *.jpg *.bmp *.gif)', options=options)
 
         if fileName:
-            gen = glob.iglob(os.path.dirname(fileName) + r"/**/*.*", recursive=True)
+            gen = glob.glob(os.path.dirname(fileName) + r"/**/*.*", recursive=True)
             res = [f for f in gen if ".png" in f or ".jpeg" in f or ".jpg" in f or ".bmp" in f or ".gif" in f]
 
             self.all_image = list()
 
             for file in res:
                 self.all_image.append(os.path.normpath(file))
-                self.to_delete.append(False)
 
             self.id = 0
             self.nb_images = len(self.all_image)
 
             fileName = self.all_image[self.id]
-            print(fileName)
+
             self.update_buttons()
             self.showImageInView(fileName)
 
@@ -251,15 +249,40 @@ class MainWindow(QtWidgets.QMainWindow):
             self.rootDir = directory
 
     def showImageInView(self, fileName):
-        v_width = self.graphicsView.size()
+        # Default values if EXIF datas are not available
+        fileNametoUse = fileName
+        self.info_str = "No EXIF info"
+        exif_data = "Horizontal (normal)"
 
+        # EXIF infos
+        with open(fileName, "rb") as f:
+            tags = exifread.process_file(f, details=False) # stop_tag='Image GPSInfo'
+
+            if tags:
+                self.info_str = "\n".join(key + ": " + str(value) for key, value in tags.items())
+
+                exif_data = str(tags.get("Image Orientation"))
+                if exif_data != "Horizontal (normal)":
+                    img = Image.open(fileName)
+                    img_tmp = ImageOps.exif_transpose(img)
+                    img_tmp.save("temp.jpg")
+                    fileNametoUse = "temp.jpg"
+
+        v_width = self.graphicsView.size()
         scene = QtWidgets.QGraphicsScene(self)
-        pixmap = QtGui.QPixmap(fileName).scaled(v_width - QtCore.QSize(2, 2), QtCore.Qt.KeepAspectRatio)
+        pixmap = QtGui.QPixmap(fileNametoUse).scaled(v_width - QtCore.QSize(2, 2), QtCore.Qt.KeepAspectRatio)
         item = QtWidgets.QGraphicsPixmapItem(pixmap)
         scene.addItem(item)
 
         self.graphicsView.setScene(scene)
-        self.infoLabel.setText(f"[{self.id + 1}/{self.nb_images}]: {fileName}")
+        self.nbImage.setText(f"{self.id + 1} on {self.nb_images}")
+        self.picture_name.label.setText(fileName)
+
+        if self.exifInfo.isVisible():
+            self.exifInfo.setPlainText(self.info_str)
+
+        if exif_data != "Horizontal (normal)":
+            os.remove("temp.jpg")
 
     def previousImage(self):
         self.id = (self.id - 1) % self.nb_images
@@ -287,4 +310,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_buttons(self):
         self.act_clip.setDisabled(False)
+
+    def switch_info(self):
+        self.show_exif_info = not self.show_exif_info
+
+        if self.show_exif_info:
+            self.exifInfo.setPlainText(self.info_str)
+            self.exifInfo.show()
+        else:
+            self.exifInfo.hide()
+
+    def show_help(self):
+        if self.help_window.isVisible():
+            self.help_window.hide()
+        else:
+            self.help_window.show()
+
+    def show_picture_name(self):
+        if self.picture_name.isVisible():
+            self.picture_name.hide()
+        else:
+            self.picture_name.show()
+
+    def resizeEvent(self, event):
+        # Resize picture_name
+        imageInfoWidth = int(max(self.picture_name.sizeHint().width(), self.graphicsView.width() * .6))
+        imageInfoRect = QtCore.QRect(int((self.graphicsView.width() - imageInfoWidth) * .5), 20, imageInfoWidth, self.picture_name.sizeHint().height())
+        self.picture_name.setGeometry(imageInfoRect)
+
 
